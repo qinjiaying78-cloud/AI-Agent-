@@ -1,0 +1,84 @@
+# FinOps & AI Agent: 业财结算核对与多语种合同解析自动化系统
+
+> **Author**: 秦佳颖 (Qin Jiaying) | 赫瑞-瓦特大学 & 南昌大学 (2+2) 会计与商业金融  
+> **Contact**: qinjiaying78@gmail.com | **GitHub**: [qinjiaying78-cloud](https://github.com/qinjiaying78-cloud)
+
+本项目为个人在**商业平台商户分成审计（200+商户 / 10万+交易流水）**与**跨国项目业财管理（AIESEC）**实践中所沉淀的**财务数字化（FinOps）与 AI Agent 自动化提效工具库**。（注：涉及具体商业机密与真实财务底稿数据已做全脱敏处理，仅展示核心工程架构、对账算法与 Agent 工作流配置）。
+
+---
+
+## 一、 系统架构与核心业务场景 (System Architecture)
+
+针对互联网商业化平台（如直播分成、UP主商单撮合、游戏联运分账、跨境ACG版权采购）及大型商业综合体场景，解决**“业务订单流水量大、多方阶梯分成规则复杂、跨语种非标合同审阅慢”**三大业财痛点：
+
+1. **多语种合同与請求書解析智能体 (`Contract-Parsing-Agent`)**
+   * **痛点**：人工审阅中、英、日文非标合同与日方版税结算单（Royalty Report / 請求書）耗时且易漏看阶梯扣点、抵扣条款。
+   * **方案**：基于 Claude / Gemini 大模型构建结构化提取工作流，自动抽提发票抬头、总额法/净额法判定要素、保底分成（MG）、阶梯费率及账期，直连 Excel 台账，将审阅与制单效率提升 **50%**。
+2. **大体量多渠道流水勾稽与分成重算引擎 (`Multi-Channel-Reconciliation`)**
+   * **痛点**：前端业务订单系统（Order/POS）、第三方支付渠道（微信/支付宝/银联清分账单）与财务 ERP 总账存在跨期时间差、通道手续费扣减及促销补贴分摊差异。
+   * **方案**：基于 `Python (Pandas)` 对 **10万+ 条流水**进行主键动态映射、剔除退款与通道费、按合同阶梯规则自动重算（Recalculation），精准定位少计分成与跨期截留风险，对账效率提升 **40%**。
+
+---
+
+## 二、 核心对账与分成重算代码 (`reconciliation_engine.py`)
+
+```python
+import pandas as pd
+import numpy as np
+
+class FinOpsReconciliationEngine:
+    """
+    平台型业务多方分成结算与第三方支付流水自动化核对引擎
+    适用场景：商业平台商户抽成、直播/商单分成、游戏联运流水分账核对
+    """
+    def __init__(self, tolerance: float = 10.0):
+        self.tolerance = tolerance
+
+    def run_reconciliation(
+        self, 
+        order_df: pd.DataFrame, 
+        payment_df: pd.DataFrame, 
+        contract_df: pd.DataFrame
+    ) -> pd.DataFrame:
+        # 1. 聚合业务端有效GMV流水（剔除退款、测试单与未完结订单）
+        valid_orders = order_df[order_df['order_status'] == 'SETTLED']
+        order_summary = valid_orders.groupby('partner_id').agg(
+            gross_gmv=('order_amount', 'sum'),
+            promo_subsidy=('platform_coupon', 'sum'),
+            order_count=('order_id', 'count')
+        ).reset_index()
+
+        # 2. 聚合第三方支付渠道清分账单（实收资金与通道手续费）
+        pay_summary = payment_df.groupby('partner_id').agg(
+            channel_settled=('net_amount', 'sum'),
+            channel_fee=('fee_amount', 'sum')
+        ).reset_index()
+
+        # 3. 拉通【业务端—支付端—合同规则库】三方数据
+        df = pd.merge(order_summary, pay_summary, on='partner_id', how='outer').fillna(0)
+        df = pd.merge(df, contract_df, on='partner_id', how='left')
+
+        # 4. 结合合同条款（保底金额 MG vs 阶梯分成比例 Tiered Rate）自动重算平台应收分成
+        def calculate_expected_share(row):
+            net_base = row['gross_gmv'] - row['promo_subsidy']
+            # 阶梯分成逻辑：超过阈值部分按高阶费率计算
+            if net_base > row['tier_threshold']:
+                tiered_rev = (row['tier_threshold'] * row['base_rate']) + \
+                             ((net_base - row['tier_threshold']) * row['excess_rate'])
+            else:
+                tiered_rev = net_base * row['base_rate']
+            return max(row['minimum_guarantee'], tiered_rev)
+
+        df['expected_platform_rev'] = df.apply(calculate_expected_share, axis=1)
+
+        # 5. 计算业财结算差异与支付清分差异，输出异常波动风险标签
+        df['settlement_variance'] = df['expected_platform_rev'] - df['erp_booked_rev']
+        df['cash_flow_variance'] = df['gross_gmv'] - (df['channel_settled'] + df['channel_fee'])
+
+        df['audit_status'] = np.where(
+            (df['settlement_variance'].abs() > self.tolerance) | 
+            (df['cash_flow_variance'].abs() > self.tolerance),
+            'ALERT_异常波动待穿透核查',
+            'PASS_业财核对闭环'
+        )
+        return df.sort_values(by='settlement_variance', ascending=False)
