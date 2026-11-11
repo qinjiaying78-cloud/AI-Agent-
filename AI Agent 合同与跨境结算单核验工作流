@@ -1,0 +1,19 @@
+Agent_Name: FinOps_Contract_And_Invoice_Auditor
+Model_Backend: Claude-3.5-Sonnet / Gemini-1.5-Pro
+Supported_Languages: [zh-CN, en-US, ja-JP]
+
+Workflow_Steps:
+  - Step_1_OCR_and_Parsing: 识别PDF合同、补充协议或日文請求書（Invoice/Royalty Report）全文。
+  - Step_2_Rule_Extraction: 按既定 JSON Schema 提取结算主体、币种、税率（增值税/代扣代缴）、保底与分成阶梯。
+  - Step_3_Cross_Validation: 自动比对【合同约定费率】与【本期结算单实际执行费率】、【开票申请表抬头/金额】是否一致。
+  - Step_4_Accounting_Check: 根据权责发生制与CAS/IFRS准则，提示收入确认方法（总额法 Gross vs 净额法 Net）及跨期递延风险。
+
+Output_JSON_Example:
+  {
+    "partner_name": "株式会社〇〇 / 某品牌商户",
+    "currency": "JPY / CNY",
+    "recognition_basis": "Net_Method (净额法) / Gross_Method (总额法)",
+    "settlement_formula": "MG保底 + 阶梯分成 (15% ~ 25%)",
+    "tax_compliance": "6% 增值税专用发票 / 跨境代扣代缴特许权使用费税率核验通过",
+    "variance_alert": "无异常，合同条款与本期结算单金额 100% 匹配"
+  }
