@@ -1,0 +1,44 @@
+import pandas as pd
+import numpy as np
+
+def audit_merchant_settlement(pos_df: pd.DataFrame, pay_df: pd.DataFrame, contract_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    拉通前端业务订单流水(POS/Order)、第三方支付账单(Payment)与合同分成规则(Contract)进行交叉核对
+    适用场景：商业综合体商户联营抽成、互联网平台直播打赏/商单/游戏联运阶梯分成核对
+    """
+    # 1. 聚合业务端与支付端月度有效GMV流水（剔除退款与异常未清分订单）
+    pos_summary = pos_df[pos_df['status'] == 'SUCCESS'].groupby('merchant_id').agg(
+        order_amount=('order_amount', 'sum'),
+        promo_deduction=('promo_deduction', 'sum')
+    ).reset_index()
+    
+    pay_summary = pay_df.groupby('merchant_id').agg(
+        settled_amount=('settled_amount', 'sum'),
+        channel_fee=('channel_fee', 'sum')
+    ).reset_index()
+    
+    # 2. 合并业务流水、支付清分账单与合同条款
+    merged = pd.merge(pos_summary, pay_summary, on='merchant_id', how='outer').fillna(0)
+    merged = pd.merge(merged, contract_df, on='merchant_id', how='left')
+    
+    # 3. 根据合同规则（保底分成 vs 阶梯扣点分成 取高者）自动重算应收分成收入
+    def calc_expected_revenue(row):
+        net_gmv = max(0, row['order_amount'] - row['promo_deduction'])
+        tiered_share = net_gmv * row['commission_rate']
+        return max(row['minimum_guarantee'], tiered_share)
+    
+    merged['expected_rev'] = merged.apply(calc_expected_revenue, axis=1)
+    
+    # 4. 计算业财结算差异并标记异常风险（差异金额 > 100 或 支付端与业务端流水倒挂）
+    merged['rev_variance'] = (merged['expected_rev'] - merged['booked_rev']).round(2)
+    merged['flow_variance'] = (merged['order_amount'] - (merged['settled_amount'] + merged['channel_fee'])).round(2)
+    
+    merged['risk_flag'] = np.where(
+        (merged['rev_variance'].abs() > 100) | (merged['flow_variance'].abs() > 50), 
+        'HIGH_RISK_异常待查', 
+        'PASS_核对一致'
+    )
+    return merged.sort_values(by='rev_variance', ascending=False)
+
+if __name__ == '__main__':
+    print("FinOps Reconciliation Engine Initialized Successfully.")
